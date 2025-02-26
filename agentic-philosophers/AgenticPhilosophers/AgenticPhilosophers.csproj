@@ -9,8 +9,14 @@
     <RootNamespace />
   </PropertyGroup>
 
-<ItemGroup>
+  <ItemGroup>
     <None Remove="Resources\*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="PromptTemplates\*.yaml">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </EmbeddedResource>
   </ItemGroup>
 
   <ItemGroup>
