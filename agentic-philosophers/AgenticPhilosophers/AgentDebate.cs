@@ -27,21 +27,16 @@ public class AgentDebate
             { AssistantSampleMetadataKey, bool.TrueString }
         });
 
+
     public async Task DebateAsync(string prompt)
     {
-        // State the prompt that will start the conversation
-        // between the agentic philosophers.
+        // State the prompt that will start the conversation between the philosophers
         Console.WriteLine(prompt);
 
-        // Create the OpenAI client provider for the OpenAI Assistant agent 
-        // and load an environment variable for the OpenAI endpoint and model.
-        DotEnv.Load(options: new DotEnvOptions(
-            ignoreExceptions: true,
-            envFilePaths: new[] {"../.env"}
-        ));
-        
+        // Load environment variables
+        LoadEnvFile();
         var endpoint = Environment.GetEnvironmentVariable("AZURE_OPENAI_ENDPOINT") 
-            ?? throw new InvalidOperationException("Environment variable 'AZURE_OPENAI_ENDPOINT' is not set.");
+             ?? throw new InvalidOperationException("Environment variable 'AZURE_OPENAI_ENDPOINT' is not set.");
 
         var model = Environment.GetEnvironmentVariable("AZURE_OPENAI_DEPLOYMENT_NAME") 
             ?? throw new InvalidOperationException("Environment variable 'AZURE_OPENAI_DEPLOYMENT_NAME' is not set.");            
@@ -50,7 +45,7 @@ public class AgentDebate
         var kernel = KernelFactory.CreateKernel(model, endpoint);        
 
         // Define the agent for Socrates
-        var socratesAgentPrompt = await File.ReadAllTextAsync("PromptTemplates/SocratesAgent.yaml");
+        var socratesAgentPrompt = await ReadYamlFile("PromptTemplates/SocratesAgent.yaml");
         var socratesPrompt = KernelFunctionYaml.ToPromptTemplateConfig(socratesAgentPrompt);
         ChatCompletionAgent socrates = new(socratesPrompt)
         {
@@ -58,16 +53,26 @@ public class AgentDebate
         };
 
         // Define the agent for Aristotle
-        var aristotleAgentPrompt = await File.ReadAllTextAsync("PromptTemplates/AristotleAgent.yaml");
+        var aristotleAgentPrompt = await ReadYamlFile("PromptTemplates/AristotleAgent.yaml");
         var aristotlePrompt = KernelFunctionYaml.ToPromptTemplateConfig(aristotleAgentPrompt);                
         ChatCompletionAgent aristotle = new (aristotlePrompt)
         {
             Kernel = kernel
         };
 
-        OpenAIClientProvider provider = OpenAIClientProvider.ForAzureOpenAI(new DefaultAzureCredential(), new Uri(endpoint));
+        // Use the tenant ID from the environment variable if it exists
+        var tenantId = Environment.GetEnvironmentVariable("AZURE_TENANT_ID");
+        var credentialOptions = new DefaultAzureCredentialOptions();
+        if (!string.IsNullOrEmpty(tenantId))
+        {
+            credentialOptions.TenantId = tenantId;
+        }
+        var credential = new DefaultAzureCredential(credentialOptions);
 
-        // Upload file
+        // Create a provider for the OpenAI client
+        OpenAIClientProvider provider = OpenAIClientProvider.ForAzureOpenAI(credential, new Uri(endpoint));
+
+        // Upload Plato's file
         OpenAIFileClient fileClient = provider.Client.GetOpenAIFileClient();
         await using Stream stream = EmbeddedResource.ReadStream(PlatoFileName)!;
         OpenAIFile fileInfo = await fileClient.UploadFileAsync(stream, PlatoFileName, FileUploadPurpose.Assistants);
@@ -83,7 +88,7 @@ public class AgentDebate
                 });
 
         // Create the agent for Plato using a template
-        string platoAgentPrompt = await File.ReadAllTextAsync("PromptTemplates/PlatoAgent.yaml");
+        string platoAgentPrompt = await ReadYamlFile("PromptTemplates/PlatoAgent.yaml");
         PromptTemplateConfig templateConfig = KernelFunctionYaml.ToPromptTemplateConfig(platoAgentPrompt);        
         OpenAIAssistantAgent plato = await OpenAIAssistantAgent.CreateFromTemplateAsync(
             provider,
@@ -186,5 +191,35 @@ public class AgentDebate
             await fileClient.DeleteFileAsync(fileInfo.Id);
         }     
     }
+
+    private void LoadEnvFile()
+    {
+        string[] possiblePaths = {
+            "../.env",
+            ".env"
+        };        
+
+        foreach (var path in possiblePaths)
+        {
+            if (File.Exists(path))
+            {
+                DotEnv.Load(options: new DotEnvOptions(
+                    ignoreExceptions: true,
+                    envFilePaths: new[] { path }
+                ));
+                return;
+            }
+        }     
+    }
+
+    private async Task<string> ReadYamlFile(string filename)
+    {
+        var filePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, filename);
+
+        if (!File.Exists(filePath))
+            throw new FileNotFoundException($"File '{filename}' not found at '{filePath}'.");
+
+        return await File.ReadAllTextAsync(filePath);
+    }    
 }
 
