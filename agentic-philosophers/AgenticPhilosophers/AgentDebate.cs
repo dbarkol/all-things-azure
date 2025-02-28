@@ -9,6 +9,7 @@ using OpenAI.Files;
 using OpenAI.VectorStores;
 using Resources;
 using dotenv.net;
+using OpenAI.Assistants;
 
 public class AgentDebate
 {
@@ -47,20 +48,24 @@ public class AgentDebate
         // Define the agent for Socrates
         var socratesAgentPrompt = await ReadYamlFile("PromptTemplates/SocratesAgent.yaml");
         var socratesPrompt = KernelFunctionYaml.ToPromptTemplateConfig(socratesAgentPrompt);
-        ChatCompletionAgent socrates = new(socratesPrompt)
-        {
-            Kernel = kernel
-        };
+        KernelPromptTemplateFactory templateFactory = new();
+        ChatCompletionAgent socrates =
+            new(socratesPrompt, templateFactory)
+            {
+                Kernel = kernel
+            };       
 
         // Define the agent for Aristotle
         var aristotleAgentPrompt = await ReadYamlFile("PromptTemplates/AristotleAgent.yaml");
         var aristotlePrompt = KernelFunctionYaml.ToPromptTemplateConfig(aristotleAgentPrompt);                
-        ChatCompletionAgent aristotle = new (aristotlePrompt)
-        {
-            Kernel = kernel
-        };
+        ChatCompletionAgent aristotle =
+            new(aristotlePrompt, templateFactory)
+            {
+                Kernel = kernel
+            };  
 
-        // Use the tenant ID from the environment variable if it exists
+        // Use the tenant ID from the environment variable if it exists and
+        // create a credential for the OpenAI client
         var tenantId = Environment.GetEnvironmentVariable("AZURE_TENANT_ID");
         var credentialOptions = new DefaultAzureCredentialOptions();
         if (!string.IsNullOrEmpty(tenantId))
@@ -87,28 +92,30 @@ public class AgentDebate
                     Metadata = { { AssistantSampleMetadataKey, bool.TrueString } }
                 });
 
-        // Create the agent for Plato using a template
+        // Create the agent for Plato using a template. Also, add the file-search tool
+        // to the agent and associate it with the vector-store created above.
         string platoAgentPrompt = await ReadYamlFile("PromptTemplates/PlatoAgent.yaml");
-        PromptTemplateConfig templateConfig = KernelFunctionYaml.ToPromptTemplateConfig(platoAgentPrompt);        
-        OpenAIAssistantAgent plato = await OpenAIAssistantAgent.CreateFromTemplateAsync(
-            provider,
-            capabilities : new OpenAIAssistantCapabilities(model)
-            {
-                Metadata = AssistantSampleMetadata
-            },
-            kernel: new Kernel(),
-            new KernelArguments(),
-            templateConfig
-        );
+        PromptTemplateConfig platoTemplateConfig = KernelFunctionYaml.ToPromptTemplateConfig(platoAgentPrompt);       
+        AssistantClient assistantClient = provider.Client.GetAssistantClient();
+        AssistantCreationOptions assistantOptions = new()
+        {
+            Name = platoTemplateConfig.Name,
+            Description = platoTemplateConfig.Description,
+            Instructions = platoTemplateConfig.Template
+        };
+
+        assistantOptions.Metadata.Add(AssistantSampleMetadataKey, bool.TrueString);
+        assistantOptions.Tools.Add(ToolDefinition.CreateFileSearch());        
+        FileSearchToolResources fileSearch = new() { VectorStoreIds = { result.VectorStoreId } };
+        ToolResources toolResources = new() { FileSearch = fileSearch };
+        assistantOptions.ToolResources = toolResources;        
+        Assistant assistant = await assistantClient.CreateAssistantAsync(model, assistantOptions);
+        OpenAIAssistantAgent plato = new(assistant, assistantClient);
 
         // Create a thread associated with a vector-store for the agent conversation.
-        string threadId =
-            await plato.CreateThreadAsync(
-                new OpenAIThreadCreationOptions
-                {
-                    VectorStoreId = result.VectorStoreId,
-                    Metadata = AssistantSampleMetadata,
-                });        
+        string threadId = await assistantClient.CreateThreadAsync(
+                            vectorStoreId: result.VectorStoreId,
+                            metadata: AssistantSampleMetadata);      
 
         try
         {
@@ -147,6 +154,7 @@ public class AgentDebate
                     """
             );
 
+            // Create the group chat, include the agents and set the execution settings
             AgentGroupChat chat = new(socrates, aristotle, plato)
             {
                 ExecutionSettings = new()
@@ -166,8 +174,8 @@ public class AgentDebate
                 }
             };
 
+            // Start the conversation
             chat.AddChatMessage(new ChatMessageContent(AuthorRole.User, prompt));
-
             await foreach (var content in chat.InvokeAsync())
             {
                 Console.WriteLine();
@@ -185,8 +193,8 @@ public class AgentDebate
         finally
         {
             // Cleanup thread and vector-store
-            await plato.DeleteThreadAsync(threadId);
-            await plato.DeleteAsync();
+            await assistantClient.DeleteThreadAsync(threadId);
+            await assistantClient.DeleteAssistantAsync(assistant.Id);
             await vectorStoreClient.DeleteVectorStoreAsync(result.VectorStoreId);
             await fileClient.DeleteFileAsync(fileInfo.Id);
         }     
